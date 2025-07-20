@@ -116,63 +116,194 @@ class Mkv(Media):
         self.tracks = tracks
 
     def get_pgs_medias(self, options: Options):
-        tracks = [t for t in self.tracks
-                  if t.type == 'subtitles' and t.codec == 'HDMV PGS' and t.enabled]
-        tracks.sort(key=lambda x: x.forced)
-        tracks.sort(key=lambda x: x.id)
-        selected_languages: typing.Dict[Language, int] = {}
-        # For certain filters, we need to track different types separately
-        selected_types_per_lang: typing.Dict[typing.Tuple[Language, str], int] = {}
+            try:
+                # NEW LOGIC: Try the enhanced implementation with RipAllTracks support
+                tracks = [t for t in self.tracks
+                        if t.type == 'subtitles' and t.codec == 'HDMV PGS' and t.enabled]
+                tracks.sort(key=lambda x: x.forced)
+                tracks.sort(key=lambda x: x.id)
+                selected_languages: typing.Dict[Language, int] = {}
+                # For certain filters, we need to track different types separately
+                selected_types_per_lang: typing.Dict[typing.Tuple[Language, str], int] = {}
 
-        for t in tracks:
-            language = t.language
-            if options.languages and language not in options.languages:
-                logger.debug('Filtering out track %s:%s in %s', t.id, language, self)
-                continue
+                for t in tracks:
+                    language = t.language
+                    if options.languages and language not in options.languages:
+                        logger.debug('Filtering out track %s:%s in %s', t.id, language, self)
+                        continue
 
-            # Apply subtitle type filter
-            if not t.matches_type_filter(options.subtitle_type_filter):
-                logger.debug('Filtering out track %s:%s (type filter: %s) in %s',
-                           t.id, language, options.subtitle_type_filter.value, self)
-                continue
+                    # Apply subtitle type filter
+                    if not t.matches_type_filter(options.subtitle_type_filter):
+                        logger.debug('Filtering out track %s:%s (type filter: %s) in %s',
+                                t.id, language, options.subtitle_type_filter.value, self)
+                        continue
 
-            # Determine track type for naming and selection logic
-            track_type = 'forced' if t.forced else ('sdh' if t.is_sdh else 'full')
-            type_key = (language, track_type)
+                    # Determine track type for naming and selection logic
+                    track_type = 'forced' if t.forced else ('sdh' if t.is_sdh else 'full')
+                    type_key = (language, track_type)
 
-            # For mixed filters (forced-included, sdh-included, all-included), allow multiple types per language
-            # For single type filters or default, use original one_per_lang logic
-            should_skip_duplicate = False
-            if options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
-                # Allow one track per type per language
-                if type_key in selected_types_per_lang:
-                    should_skip_duplicate = True
-            else:
-                # Original logic: one track per language
-                if options.one_per_lang and language in selected_languages:
-                    should_skip_duplicate = True
+                    # NEW LOGIC: If one_per_lang is False (RipAllTracks=True), allow all tracks
+                    should_skip_duplicate = False
+                    if not options.one_per_lang:
+                        # RipAllTracks is True - process all tracks regardless of duplicates
+                        should_skip_duplicate = False
+                    elif options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
+                        # Allow one track per type per language
+                        if type_key in selected_types_per_lang:
+                            should_skip_duplicate = True
+                    else:
+                        # Original logic: one track per language
+                        if language in selected_languages:
+                            should_skip_duplicate = True
 
-            if should_skip_duplicate:
-                logger.debug('Skipping track %s:%s (%s) - already have this type/language', t.id, language, track_type)
-                continue
+                    if should_skip_duplicate:
+                        logger.debug('Skipping track %s:%s (%s) - already have this type/language', t.id, language, track_type)
+                        continue
 
-            if not language:
-                logger.debug('Skipping unknown language track %s in %s', t.id, self)
-                continue
+                    if not language:
+                        logger.debug('Skipping unknown language track %s in %s', t.id, self)
+                        continue
 
-            # Use track type for numbering when we have mixed types
-            if options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
-                track_number = selected_types_per_lang.get(type_key, 0)
-                selected_types_per_lang[type_key] = track_number + 1
-            else:
-                track_number = selected_languages.get(language, 0)
-                selected_languages[language] = track_number + 1
+                    # Use track type for numbering when we have mixed types OR when processing all tracks
+                    if not options.one_per_lang or options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
+                        track_number = selected_types_per_lang.get(type_key, 0)
+                        selected_types_per_lang[type_key] = track_number + 1
+                    else:
+                        track_number = selected_languages.get(language, 0)
+                        selected_languages[language] = track_number + 1
 
-            pgs = MkvPgs(self.media_path, t.id, language, track_number, options=options)
-            # Store track type in the pgs object for later use in naming
-            pgs.track_type = track_type
-            # Also update the media_path to include the track type
-            pgs.media_path = pgs.media_path.translate(subtitle_type=track_type)
-            if pgs.matches(options):
-                logger.debug('Selecting track %s:%s (%s) in %s', t.id, language, track_type, self)
-                yield pgs
+                    pgs = MkvPgs(self.media_path, t.id, language, track_number, options=options)
+                    # Store track type in the pgs object for later use in naming
+                    pgs.track_type = track_type
+                    # Also update the media_path to include the track type
+                    pgs.media_path = pgs.media_path.translate(subtitle_type=track_type)
+                    if pgs.matches(options):
+                        logger.debug('Selecting track %s:%s (%s) in %s', t.id, language, track_type, self)
+                        yield pgs
+
+            except Exception as e:
+                # FALLBACK: If new logic fails, use original implementation
+                logger.warning('New logic failed, falling back to original implementation: %s', e)
+                
+                tracks = [t for t in self.tracks
+                        if t.type == 'subtitles' and t.codec == 'HDMV PGS' and t.enabled]
+                tracks.sort(key=lambda x: x.forced)
+                tracks.sort(key=lambda x: x.id)
+                selected_languages: typing.Dict[Language, int] = {}
+                # For certain filters, we need to track different types separately
+                selected_types_per_lang: typing.Dict[typing.Tuple[Language, str], int] = {}
+
+                for t in tracks:
+                    language = t.language
+                    if options.languages and language not in options.languages:
+                        logger.debug('Filtering out track %s:%s in %s', t.id, language, self)
+                        continue
+
+                    # Apply subtitle type filter
+                    if not t.matches_type_filter(options.subtitle_type_filter):
+                        logger.debug('Filtering out track %s:%s (type filter: %s) in %s',
+                                t.id, language, options.subtitle_type_filter.value, self)
+                        continue
+
+                    # Determine track type for naming and selection logic
+                    track_type = 'forced' if t.forced else ('sdh' if t.is_sdh else 'full')
+                    type_key = (language, track_type)
+
+                    # For mixed filters (forced-included, sdh-included, all-included), allow multiple types per language
+                    # For single type filters or default, use original one_per_lang logic
+                    should_skip_duplicate = False
+                    if options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
+                        # Allow one track per type per language
+                        if type_key in selected_types_per_lang:
+                            should_skip_duplicate = True
+                    else:
+                        # Original logic: one track per language
+                        if options.one_per_lang and language in selected_languages:
+                            should_skip_duplicate = True
+
+                    if should_skip_duplicate:
+                        logger.debug('Skipping track %s:%s (%s) - already have this type/language', t.id, language, track_type)
+                        continue
+
+                    if not language:
+                        logger.debug('Skipping unknown language track %s in %s', t.id, self)
+                        continue
+
+                    # Use track type for numbering when we have mixed types
+                    if options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
+                        track_number = selected_types_per_lang.get(type_key, 0)
+                        selected_types_per_lang[type_key] = track_number + 1
+                    else:
+                        track_number = selected_languages.get(language, 0)
+                        selected_languages[language] = track_number + 1
+
+                    pgs = MkvPgs(self.media_path, t.id, language, track_number, options=options)
+                    # Store track type in the pgs object for later use in naming
+                    pgs.track_type = track_type
+                    # Also update the media_path to include the track type
+                    pgs.media_path = pgs.media_path.translate(subtitle_type=track_type)
+                    if pgs.matches(options):
+                        logger.debug('Selecting track %s:%s (%s) in %s', t.id, language, track_type, self)
+                        yield pgs
+            tracks = [t for t in self.tracks
+                    if t.type == 'subtitles' and t.codec == 'HDMV PGS' and t.enabled]
+            tracks.sort(key=lambda x: x.forced)
+            tracks.sort(key=lambda x: x.id)
+            selected_languages: typing.Dict[Language, int] = {}
+            # For certain filters, we need to track different types separately
+            selected_types_per_lang: typing.Dict[typing.Tuple[Language, str], int] = {}
+
+            for t in tracks:
+                language = t.language
+                if options.languages and language not in options.languages:
+                    logger.debug('Filtering out track %s:%s in %s', t.id, language, self)
+                    continue
+
+                # Apply subtitle type filter
+                if not t.matches_type_filter(options.subtitle_type_filter):
+                    logger.debug('Filtering out track %s:%s (type filter: %s) in %s',
+                            t.id, language, options.subtitle_type_filter.value, self)
+                    continue
+
+                # Determine track type for naming and selection logic
+                track_type = 'forced' if t.forced else ('sdh' if t.is_sdh else 'full')
+                type_key = (language, track_type)
+
+                # NEW LOGIC: If one_per_lang is False (RipAllTracks=True), allow all tracks
+                should_skip_duplicate = False
+                if not options.one_per_lang:
+                    # RipAllTracks is True - process all tracks regardless of duplicates
+                    should_skip_duplicate = False
+                elif options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
+                    # Allow one track per type per language
+                    if type_key in selected_types_per_lang:
+                        should_skip_duplicate = True
+                else:
+                    # Original logic: one track per language
+                    if language in selected_languages:
+                        should_skip_duplicate = True
+
+                if should_skip_duplicate:
+                    logger.debug('Skipping track %s:%s (%s) - already have this type/language', t.id, language, track_type)
+                    continue
+
+                if not language:
+                    logger.debug('Skipping unknown language track %s in %s', t.id, self)
+                    continue
+
+                # Use track type for numbering when we have mixed types OR when processing all tracks
+                if not options.one_per_lang or options.subtitle_type_filter in [SubtitleTypeFilter.FORCED_INCLUDED, SubtitleTypeFilter.SDH_INCLUDED, SubtitleTypeFilter.ALL_INCLUDED]:
+                    track_number = selected_types_per_lang.get(type_key, 0)
+                    selected_types_per_lang[type_key] = track_number + 1
+                else:
+                    track_number = selected_languages.get(language, 0)
+                    selected_languages[language] = track_number + 1
+
+                pgs = MkvPgs(self.media_path, t.id, language, track_number, options=options)
+                # Store track type in the pgs object for later use in naming
+                pgs.track_type = track_type
+                # Also update the media_path to include the track type
+                pgs.media_path = pgs.media_path.translate(subtitle_type=track_type)
+                if pgs.matches(options):
+                    logger.debug('Selecting track %s:%s (%s) in %s', t.id, language, track_type, self)
+                    yield pgs
